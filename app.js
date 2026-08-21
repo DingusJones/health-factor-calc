@@ -190,41 +190,62 @@ function updateSimBorrow(idx, field, value) {
   renderResults();
 }
 
-function addSimCollateral() {
+function addSimCollateral(assetMtoken) {
   if (!state.simMode || !state.position) return;
+  if (!assetMtoken) return;
   const available = state.position.availableMarkets || [];
-  if (available.length === 0) {
-    // Manual add — user types asset name
-    state.simCollaterals.push({ asset: 'NEW', suppliedUsd: 0, collateralFactor: 0.8, adjustedUsd: 0, price: 0 });
-  } else {
-    // Add first available market not already in collaterals
-    const existing = new Set(state.simCollaterals.map(c => c.asset));
-    const next = available.find(m => !existing.has(m.mToken));
-    if (next) {
-      state.simCollaterals.push({ asset: next.mToken, suppliedUsd: 0, collateralFactor: next.collateralFactor, adjustedUsd: 0, price: 0 });
-    } else {
-      state.simCollaterals.push({ asset: 'NEW', suppliedUsd: 0, collateralFactor: 0.8, adjustedUsd: 0, price: 0 });
-    }
-  }
+  const found = available.find(m => m.mToken === assetMtoken);
+  const cf = found ? found.collateralFactor : 0.8;
+  const sym = normalizeSymbol(assetMtoken);
+  state.simCollaterals.push({
+    asset: assetMtoken,
+    suppliedUsd: 0,
+    collateralFactor: cf,
+    adjustedUsd: 0,
+    price: state.prices[sym] || 0,
+  });
   renderResults();
 }
 
-function addSimBorrow() {
+function addSimBorrow(assetMtoken) {
   if (!state.simMode || !state.position) return;
-  const available = state.position.availableMarkets || [];
-  if (available.length === 0) {
-    state.simBorrows.push({ asset: 'NEW', borrowedUsd: 0, price: 0 });
-  } else {
-    const existing = new Set(state.simBorrows.map(b => b.asset));
-    const next = available.find(m => !existing.has(m.mToken));
-    if (next) {
-      const sym = normalizeSymbol(next.mToken);
-      state.simBorrows.push({ asset: next.mToken, borrowedUsd: 0, price: state.prices[sym] || 0 });
-    } else {
-      state.simBorrows.push({ asset: 'NEW', borrowedUsd: 0, price: 0 });
-    }
-  }
+  if (!assetMtoken) return;
+  const sym = normalizeSymbol(assetMtoken);
+  state.simBorrows.push({
+    asset: assetMtoken,
+    borrowedUsd: 0,
+    price: state.prices[sym] || 0,
+  });
   renderResults();
+}
+
+/**
+ * Build a dropdown that lets the user pick which available market to add.
+ * @param {string} kind - 'collateral' or 'borrow'
+ * @returns {string} HTML for a select + add button, or empty if nothing available
+ */
+function simAddPicker(kind) {
+  if (!state.simMode || !state.position) return '';
+  const available = state.position.availableMarkets || [];
+  const used = kind === 'collateral'
+    ? new Set(state.simCollaterals.map(c => c.asset))
+    : new Set(state.simBorrows.map(b => b.asset));
+  const options = available
+    .filter(m => !used.has(m.mToken))
+    .map(m => `<option value="${m.mToken}">${m.mToken}${kind === 'collateral' && m.collateralFactor ? ` (${Math.round(m.collateralFactor*100)}% CF)` : ''}</option>`)
+    .join('');
+
+  if (!options) return '<span class="sim-add-empty">No more assets to add</span>';
+
+  const fn = kind === 'collateral' ? 'addSimCollateral' : 'addSimBorrow';
+  return `
+    <div class="sim-add-picker">
+      <select class="sim-add-select" id="sim-add-select-${kind}">
+        <option value="">Add ${kind === 'collateral' ? 'collateral' : 'borrow'}…</option>
+        ${options}
+      </select>
+      <button class="btn-add" onclick="${fn}(document.getElementById('sim-add-select-${kind}').value)">+</button>
+    </div>`;
 }
 
 function removeSimCollateral(idx) {
@@ -348,11 +369,11 @@ function renderResults() {
     }).join('')
     : `<tr><td colspan="4" class="muted">No price data — prices needed to compute liquidation prices</td></tr>`;
 
-  // ── Simulator add buttons ──
+  // ── Simulator add pickers (choose which asset) ──
   const simControls = state.simMode
     ? `<div class="sim-controls">
-         <button class="btn-add" onclick="addSimCollateral()">+ Add Collateral</button>
-         <button class="btn-add" onclick="addSimBorrow()">+ Add Borrow</button>
+         ${simAddPicker('collateral')}
+         ${simAddPicker('borrow')}
        </div>`
     : '';
 

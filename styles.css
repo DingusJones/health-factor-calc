@@ -323,7 +323,32 @@ body {
 .sim-controls {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
   margin-bottom: 16px;
+}
+.sim-add-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sim-add-select {
+  background: var(--surface2);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 0.8rem;
+  color: var(--text);
+  cursor: pointer;
+  min-width: 150px;
+}
+.sim-add-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.sim-add-empty {
+  font-size: 0.75rem;
+  color: var(--muted);
+  padding: 6px 0;
 }
 .btn-add {
   background: var(--surface2);
