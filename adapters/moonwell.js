@@ -14,6 +14,30 @@ const MOONWELL_CHAINS = {
   10: 'optimism',
 };
 
+// Moonwell's API whitelists specific origins (moonwell.fi, localhost) and sends
+// NO Access-Control-Allow-Origin header for other origins (e.g. github.io), which
+// makes browsers block the request with "Failed to fetch". corsproxy.io is a free
+// CORS-relay that forwards the request and adds allow-origin: *.
+const CORS_PROXY = 'https://corsproxy.io/?url=';
+
+/**
+ * Fetch through Moonwell, falling back to a CORS proxy if the direct call is
+ * blocked. Direct first (fast, works from whitelisted origins), proxy on failure.
+ */
+async function moonwellFetch(path) {
+  const url = `${MOONWELL_API}${path}`;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`Moonwell HTTP ${r.status}`);
+    return await r.json();
+  } catch (directErr) {
+    // CORS/network failure — retry through the proxy
+    const r = await fetch(CORS_PROXY + encodeURIComponent(url));
+    if (!r.ok) throw new Error(`Moonwell proxy HTTP ${r.status}`);
+    return await r.json();
+  }
+}
+
 /**
  * Fetch a live Moonwell position.
  * @param {string} wallet - EVM address (0x...)
@@ -26,8 +50,8 @@ async function fetchPosition(wallet, chainId) {
 
   // Fetch health + positions in parallel
   const [healthResp, positionsResp] = await Promise.all([
-    fetch(`${MOONWELL_API}/health/${wallet}?chain=${chainParam}`).then(r => r.json()),
-    fetch(`${MOONWELL_API}/positions/${wallet}?chain=${chainParam}&active=true`).then(r => r.json()),
+    moonwellFetch(`/health/${wallet}?chain=${chainParam}`),
+    moonwellFetch(`/positions/${wallet}?chain=${chainParam}&active=true`),
   ]);
 
   if (!healthResp.success) throw new Error(healthResp.error || 'Moonwell API error');
