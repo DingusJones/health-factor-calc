@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+  <title>DeFi Health Factor Calculator</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <h1>🛡️ DeFi Health Factor Calculator</h1>
+      <p class="subtitle">Live positions across lending protocols</p>
+    </header>
+
+    <div class="controls">
+      <div class="control-row">
+        <div class="control-group">
+          <label for="protocol-select">Protocol</label>
+          <select id="protocol-select"></select>
+        </div>
+        <div class="control-group">
+          <label for="chain-select">Chain</label>
+          <select id="chain-select"></select>
+        </div>
+      </div>
+      <div class="control-row">
+        <div class="control-group control-grow">
+          <label for="wallet-input">Wallet Address</label>
+          <input type="text" id="wallet-input" placeholder="0x... or Solana address" autocomplete="off" spellcheck="false">
+        </div>
+        <button id="fetch-btn" class="btn-primary">Calculate</button>
+      </div>
+      <button id="sim-toggle" class="btn-secondary" style="display:none">🎮 Simulator</button>
+    </div>
+
+    <div id="results" class="results">
+      <div class="placeholder">Enter a wallet address and hit Calculate to see live positions</div>
+    </div>
+
+    <footer class="app-footer">
+      <p>Read-only. No wallet connection. No transactions. Just data.</p>
+      <p class="chain-count">Supports: Moonwell (Base, OP) · Aave V3 (15 chains) · Save (Solana)</p>
+    </footer>
+  </div>
+
+  <!-- Config -->
+  <script src="config/chains.js"></script>
+  <!-- Lib -->
+  <script src="lib/hf-math.js"></script>
+  <script src="lib/gauge.js"></script>
+  <script src="lib/rpc.js"></script>
+  <!-- Adapters -->
+  <script src="adapters/moonwell.js"></script>
+  <script src="adapters/aave.js"></script>
+  <script src="adapters/save.js"></script>
+  <!-- App -->
+  <script src="app.js"></script>
+</body>
+</html>
