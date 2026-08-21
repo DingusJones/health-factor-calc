@@ -1,21 +1,17 @@
 /**
  * Main application logic for the DeFi Health Factor Calculator.
  *
- * Handles UI state, protocol/chain switching, wallet input, position fetching,
- * rendering, and the what-if simulator.
- *
- * ARCHITECTURE:
- * - config/chains.js: chain + protocol registry (add new protocols/chains there)
- * - adapters/*.js: per-protocol fetch logic (add new adapter file + register)
- * - lib/hf-math.js: pure HF + liquidation calculations
- * - lib/gauge.js: SVG gauge rendering
- * - lib/rpc.js: EVM JSON-RPC helper
+ * Features:
+ * - Live position fetching across Moonwell, Aave V3, Save
+ * - Health factor gauge with zone labels
+ * - Collateral + borrow tables
+ * - Per-asset liquidation prices (requires price feeds)
+ * - What-if simulator: edit supplied/borrowed/price/CF, add new tokens
  *
  * ADDING A NEW PROTOCOL:
- * 1. Create adapters/yourprotocol.js with a fetchPosition(wallet, chainId, chainConfig) function
- * 2. Add a PROTOCOLS entry in config/chains.js with supported chains
- * 3. Add chain config (RPCs, contract addresses) to CHAINS in config/chains.js
- * 4. That's it — the app auto-discovers it from the registry
+ * 1. Create adapters/yourprotocol.js with fetchPosition(wallet, chainId, chainConfig)
+ * 2. Add a PROTOCOLS entry in config/chains.js
+ * 3. Add chain config to CHAINS in config/chains.js
  */
 
 // ── State ──
@@ -29,6 +25,7 @@ let state = {
   simMode: false,
   simCollaterals: [],
   simBorrows: [],
+  prices: {}, // { symbol: price }
 };
 
 // ── Init ──
@@ -36,9 +33,6 @@ document.addEventListener('DOMContentLoaded', () => {
   populateProtocolSelect();
   populateChainSelect();
   bindEvents();
-  // Pre-fill with Jay's wallet for convenience
-  // state.wallet = '0x8E94D067874ff30a20d218B53b4dd31b659A2820';
-  // document.getElementById('wallet-input').value = state.wallet;
 });
 
 function populateProtocolSelect() {
@@ -56,10 +50,8 @@ function populateProtocolSelect() {
 function populateChainSelect() {
   const sel = document.getElementById('chain-select');
   sel.innerHTML = '';
-
   const proto = PROTOCOLS[state.selectedProtocol];
   if (!proto) return;
-
   for (const chainId of proto.chains) {
     const chain = CHAINS[chainId];
     if (!chain) continue;
@@ -79,29 +71,23 @@ function bindEvents() {
     populateChainSelect();
     renderAll();
   });
-
   document.getElementById('chain-select').addEventListener('change', e => {
     state.selectedChain = e.target.value;
     state.position = null;
     state.simMode = false;
     renderAll();
   });
-
   document.getElementById('fetch-btn').addEventListener('click', fetchPosition);
   document.getElementById('wallet-input').addEventListener('keydown', e => {
     if (e.key === 'Enter') fetchPosition();
   });
-
   document.getElementById('sim-toggle').addEventListener('click', toggleSimulator);
 }
 
 // ── Fetch ──
 async function fetchPosition() {
   const wallet = document.getElementById('wallet-input').value.trim();
-  if (!wallet) {
-    showError('Enter a wallet address');
-    return;
-  }
+  if (!wallet) { showError('Enter a wallet address'); return; }
 
   state.wallet = wallet;
   state.loading = true;
@@ -111,9 +97,7 @@ async function fetchPosition() {
   renderAll();
 
   try {
-    const proto = PROTOCOLS[state.selectedProtocol];
     const chainConfig = CHAINS[state.selectedChain];
-
     let position;
     if (state.selectedProtocol === 'moonwell') {
       position = await MoonwellAdapter.fetchPosition(wallet, parseInt(state.selectedChain));
@@ -128,12 +112,41 @@ async function fetchPosition() {
     state.position = position;
     state.simCollaterals = JSON.parse(JSON.stringify(position.collaterals || []));
     state.simBorrows = JSON.parse(JSON.stringify(position.borrows || []));
+
+    // Fetch prices for all assets in the position
+    const allSymbols = [
+      ...(position.collaterals || []).map(c => c.asset),
+      ...(position.borrows || []).map(b => b.asset),
+    ].map(s => normalizeSymbol(s));
+
+    if (allSymbols.length > 0) {
+      state.prices = await fetchPrices(allSymbols);
+      // Inject prices into both position arrays AND sim arrays
+      (position.collaterals || []).forEach(c => { c.price = state.prices[normalizeSymbol(c.asset)] || 0; });
+      (position.borrows || []).forEach(b => { b.price = state.prices[normalizeSymbol(b.asset)] || 0; });
+      state.simCollaterals = JSON.parse(JSON.stringify(position.collaterals || []));
+      state.simBorrows = JSON.parse(JSON.stringify(position.borrows || []));
+    }
   } catch (err) {
     state.error = err.message || 'Failed to fetch position';
   }
 
   state.loading = false;
   renderAll();
+}
+
+/**
+ * Normalize token symbols for price lookup.
+ * mWETH → WETH, mcbBTC → cbBTC, mUSDC → USDC, etc.
+ */
+function normalizeSymbol(sym) {
+  if (!sym) return '';
+  // Strip m-prefix (Moonwell mTokens): mWETH→WETH, mcbBTC→cbBTC, mUSDC→USDC
+  let s = sym.replace(/^m/, '');
+  // Strip w/W prefix for wrapped tokens that track underlying
+  if (s === 'WETH') s = 'ETH';
+  if (s === 'WBTC') s = 'BTC';
+  return s;
 }
 
 // ── Simulator ──
@@ -143,6 +156,9 @@ function toggleSimulator() {
   if (state.simMode) {
     state.simCollaterals = JSON.parse(JSON.stringify(state.position.collaterals || []));
     state.simBorrows = JSON.parse(JSON.stringify(state.position.borrows || []));
+    // Inject prices
+    state.simCollaterals.forEach(c => { c.price = state.prices[normalizeSymbol(c.asset)] || 0; });
+    state.simBorrows.forEach(b => { b.price = state.prices[normalizeSymbol(b.asset)] || 0; });
   }
   renderAll();
 }
@@ -151,13 +167,16 @@ function updateSimCollateral(idx, field, value) {
   if (!state.simMode) return;
   const col = state.simCollaterals[idx];
   if (!col) return;
-
   if (field === 'suppliedUsd') {
     col.suppliedUsd = parseFloat(value) || 0;
     col.adjustedUsd = col.suppliedUsd * (col.collateralFactor || 0);
   } else if (field === 'collateralFactor') {
     col.collateralFactor = (parseFloat(value) || 0) / 100;
     col.adjustedUsd = (col.suppliedUsd || 0) * col.collateralFactor;
+  } else if (field === 'price') {
+    col.price = parseFloat(value) || 0;
+    // Recompute suppliedUsd from new price if we had an amount
+    // For simplicity, user edits USD directly so price only affects liq calc
   }
   renderResults();
 }
@@ -166,17 +185,63 @@ function updateSimBorrow(idx, field, value) {
   if (!state.simMode) return;
   const bor = state.simBorrows[idx];
   if (!bor) return;
-  if (field === 'borrowedUsd') {
-    bor.borrowedUsd = parseFloat(value) || 0;
+  if (field === 'borrowedUsd') bor.borrowedUsd = parseFloat(value) || 0;
+  if (field === 'price') bor.price = parseFloat(value) || 0;
+  renderResults();
+}
+
+function addSimCollateral() {
+  if (!state.simMode || !state.position) return;
+  const available = state.position.availableMarkets || [];
+  if (available.length === 0) {
+    // Manual add — user types asset name
+    state.simCollaterals.push({ asset: 'NEW', suppliedUsd: 0, collateralFactor: 0.8, adjustedUsd: 0, price: 0 });
+  } else {
+    // Add first available market not already in collaterals
+    const existing = new Set(state.simCollaterals.map(c => c.asset));
+    const next = available.find(m => !existing.has(m.mToken));
+    if (next) {
+      state.simCollaterals.push({ asset: next.mToken, suppliedUsd: 0, collateralFactor: next.collateralFactor, adjustedUsd: 0, price: 0 });
+    } else {
+      state.simCollaterals.push({ asset: 'NEW', suppliedUsd: 0, collateralFactor: 0.8, adjustedUsd: 0, price: 0 });
+    }
   }
+  renderResults();
+}
+
+function addSimBorrow() {
+  if (!state.simMode || !state.position) return;
+  const available = state.position.availableMarkets || [];
+  if (available.length === 0) {
+    state.simBorrows.push({ asset: 'NEW', borrowedUsd: 0, price: 0 });
+  } else {
+    const existing = new Set(state.simBorrows.map(b => b.asset));
+    const next = available.find(m => !existing.has(m.mToken));
+    if (next) {
+      const sym = normalizeSymbol(next.mToken);
+      state.simBorrows.push({ asset: next.mToken, borrowedUsd: 0, price: state.prices[sym] || 0 });
+    } else {
+      state.simBorrows.push({ asset: 'NEW', borrowedUsd: 0, price: 0 });
+    }
+  }
+  renderResults();
+}
+
+function removeSimCollateral(idx) {
+  if (!state.simMode) return;
+  state.simCollaterals.splice(idx, 1);
+  renderResults();
+}
+
+function removeSimBorrow(idx) {
+  if (!state.simMode) return;
+  state.simBorrows.splice(idx, 1);
   renderResults();
 }
 
 // ── Render ──
 function renderAll() {
   const container = document.getElementById('results');
-
-  // Show/hide sim toggle
   const simToggle = document.getElementById('sim-toggle');
   simToggle.style.display = state.position ? 'inline-block' : 'none';
 
@@ -184,12 +249,10 @@ function renderAll() {
     container.innerHTML = `<div class="loading"><div class="spinner"></div><p>Fetching position...</p></div>`;
     return;
   }
-
   if (state.error) {
     container.innerHTML = `<div class="error-msg">⚠ ${state.error}</div>`;
     return;
   }
-
   if (!state.position || state.position.noPosition) {
     const protoLabel = PROTOCOLS[state.selectedProtocol]?.name || state.selectedProtocol;
     const chainLabel = CHAINS[state.selectedChain]?.name || state.selectedChain;
@@ -203,31 +266,30 @@ function renderAll() {
           No active position found on ${protoLabel} (${chainLabel}).<br>
           <span class="muted" style="font-size: 0.8rem">This wallet may not have any borrows on this protocol/chain.</span>
         </div>
-      </div>
-    `;
+      </div>`;
     return;
   }
-
   renderResults();
 }
 
 function renderResults() {
   const container = document.getElementById('results');
-
   const collaterals = state.simMode ? state.simCollaterals : (state.position.collaterals || []);
   const borrows = state.simMode ? state.simBorrows : (state.position.borrows || []);
 
-  // Recompute HF if in sim mode
+  // Compute HF
   let hf = state.position.healthFactor;
-  let totalCollateral = state.position.totalCollateralUsd;
-  let totalSupplied = state.position.totalSuppliedUsd;
-  let totalBorrowed = state.position.totalBorrowedUsd;
-
+  let totalSupplied, totalBorrowed, totalCollateral;
   if (state.simMode) {
     hf = computeHealthFactor(collaterals, borrows);
     totalSupplied = collaterals.reduce((s, c) => s + (c.suppliedUsd || 0), 0);
     totalBorrowed = borrows.reduce((s, b) => s + (b.borrowedUsd || 0), 0);
     totalCollateral = collaterals.reduce((s, c) => s + (c.adjustedUsd || 0), 0);
+  } else {
+    hf = state.position.healthFactor;
+    totalSupplied = state.position.totalSuppliedUsd;
+    totalBorrowed = state.position.totalBorrowedUsd;
+    totalCollateral = state.position.totalCollateralUsd;
   }
 
   const zone = healthZone(hf);
@@ -236,38 +298,63 @@ function renderResults() {
   // Liquidation prices
   const liqPrices = computeLiquidationPrices(collaterals, borrows);
 
-  // Collateral table
+  // ── Collateral table ──
+  const collHeaders = state.simMode
+    ? '<tr><th>Asset</th><th>Supplied</th><th>CF</th><th>Price</th><th></th></tr>'
+    : '<tr><th>Asset</th><th>Supplied</th><th>CF</th><th>Price</th></tr>';
+
   const collRows = collaterals.length > 0
     ? collaterals.map((c, i) => {
       const cf = c.collateralFactor ? (c.collateralFactor * 100).toFixed(0) + '%' : '—';
-      const adj = c.adjustedUsd ? formatUsd(c.adjustedUsd) : '—';
-      const sup = state.simMode
-        ? `<input type="number" step="0.01" value="${(c.suppliedUsd||0).toFixed(2)}" class="sim-input" onchange="updateSimCollateral(${i},'suppliedUsd',this.value)"/>`
-        : formatUsd(c.suppliedUsd || 0);
-      const cfInput = state.simMode
-        ? `<input type="number" step="1" value="${c.collateralFactor ? (c.collateralFactor*100).toFixed(0) : ''}" class="sim-input sim-input-sm" onchange="updateSimCollateral(${i},'collateralFactor',this.value)"/>%`
-        : cf;
-      return `<tr><td>${c.asset}</td><td>${sup}</td><td>${cfInput}</td><td>${adj}</td></tr>`;
+      const priceStr = c.price > 0 ? formatPrice(c.price) : '—';
+      if (state.simMode) {
+        return `<tr>
+          <td>${c.asset}</td>
+          <td><input type="number" step="0.01" value="${(c.suppliedUsd||0).toFixed(2)}" class="sim-input" onchange="updateSimCollateral(${i},'suppliedUsd',this.value)"/></td>
+          <td><input type="number" step="1" value="${c.collateralFactor ? (c.collateralFactor*100).toFixed(0) : ''}" class="sim-input sim-input-sm" onchange="updateSimCollateral(${i},'collateralFactor',this.value)"/>%</td>
+          <td><input type="number" step="0.01" value="${(c.price||0).toFixed(2)}" class="sim-input" onchange="updateSimCollateral(${i},'price',this.value)"/></td>
+          <td><button class="btn-remove" onclick="removeSimCollateral(${i})">✕</button></td>
+        </tr>`;
+      }
+      return `<tr><td>${c.asset}</td><td>${formatUsd(c.suppliedUsd || 0)}</td><td>${cf}</td><td>${priceStr}</td></tr>`;
     }).join('')
-    : `<tr><td colspan="4" class="muted">No collateral</td></tr>`;
+    : `<tr><td colspan="${state.simMode ? 5 : 4}" class="muted">No collateral</td></tr>`;
 
-  // Borrow table
+  // ── Borrow table ──
+  const borrowHeaders = state.simMode
+    ? '<tr><th>Asset</th><th>Borrowed</th><th>Price</th><th></th></tr>'
+    : '<tr><th>Asset</th><th>Borrowed</th><th>Price</th></tr>';
+
   const borrowRows = borrows.length > 0
     ? borrows.map((b, i) => {
-      const bor = state.simMode
-        ? `<input type="number" step="0.01" value="${(b.borrowedUsd||0).toFixed(2)}" class="sim-input" onchange="updateSimBorrow(${i},'borrowedUsd',this.value)"/>`
-        : formatUsd(b.borrowedUsd || 0);
-      return `<tr><td>${b.asset}</td><td>${bor}</td></tr>`;
+      const priceStr = b.price > 0 ? formatPrice(b.price) : '—';
+      if (state.simMode) {
+        return `<tr>
+          <td>${b.asset}</td>
+          <td><input type="number" step="0.01" value="${(b.borrowedUsd||0).toFixed(2)}" class="sim-input" onchange="updateSimBorrow(${i},'borrowedUsd',this.value)"/></td>
+          <td><input type="number" step="0.01" value="${(b.price||0).toFixed(2)}" class="sim-input" onchange="updateSimBorrow(${i},'price',this.value)"/></td>
+          <td><button class="btn-remove" onclick="removeSimBorrow(${i})">✕</button></td>
+        </tr>`;
+      }
+      return `<tr><td>${b.asset}</td><td>${formatUsd(b.borrowedUsd || 0)}</td><td>${priceStr}</td></tr>`;
     }).join('')
-    : `<tr><td colspan="2" class="muted">No borrows</td></tr>`;
+    : `<tr><td colspan="${state.simMode ? 4 : 3}" class="muted">No borrows</td></tr>`;
 
-  // Liquidation prices table
+  // ── Liquidation prices table ──
   const liqRows = liqPrices.length > 0
     ? liqPrices.map(lp => {
       const weak = lp.isWeakest ? ' class="weakest"' : '';
       return `<tr${weak}><td>${lp.asset}</td><td>${formatPrice(lp.currentPrice)}</td><td>${formatPrice(lp.liquidationPrice)}</td><td>${formatPct(lp.dropPct)}</td></tr>`;
     }).join('')
-    : `<tr><td colspan="4" class="muted">Need price feeds for liquidation prices</td></tr>`;
+    : `<tr><td colspan="4" class="muted">No price data — prices needed to compute liquidation prices</td></tr>`;
+
+  // ── Simulator add buttons ──
+  const simControls = state.simMode
+    ? `<div class="sim-controls">
+         <button class="btn-add" onclick="addSimCollateral()">+ Add Collateral</button>
+         <button class="btn-add" onclick="addSimBorrow()">+ Add Borrow</button>
+       </div>`
+    : '';
 
   const protocolLabel = PROTOCOLS[state.selectedProtocol]?.name || state.selectedProtocol;
   const chainLabel = CHAINS[state.selectedChain]?.name || state.selectedChain;
@@ -293,7 +380,7 @@ function renderResults() {
       <div class="section">
         <h3>Collateral</h3>
         <table class="data-table">
-          <thead><tr><th>Asset</th><th>Supplied</th><th>CF</th><th>Adjusted</th></tr></thead>
+          <thead>${collHeaders}</thead>
           <tbody>${collRows}</tbody>
         </table>
       </div>
@@ -301,15 +388,17 @@ function renderResults() {
       <div class="section">
         <h3>Borrows</h3>
         <table class="data-table">
-          <thead><tr><th>Asset</th><th>Borrowed</th></tr></thead>
+          <thead>${borrowHeaders}</thead>
           <tbody>${borrowRows}</tbody>
         </table>
       </div>
 
+      ${simControls}
+
       <div class="section">
         <h3>Liquidation Prices</h3>
         <table class="data-table">
-          <thead><tr><th>Asset</th><th>Current</th><th>Liq. Price</th><th>Drop</th></tr></thead>
+          <thead><tr><th>Asset</th><th>Current Price</th><th>Liq. Price</th><th>Drop Needed</th></tr></thead>
           <tbody>${liqRows}</tbody>
         </table>
         ${liqPrices.length > 0 ? '<p class="table-note">🔴 Weakest link highlighted — closest to liquidation</p>' : ''}
@@ -321,7 +410,3 @@ function renderResults() {
 function showError(msg) {
   document.getElementById('results').innerHTML = `<div class="error-msg">⚠ ${msg}</div>`;
 }
-
-// ── Adapter references (loaded via script tags in index.html) ──
-// These are global because we're using plain script tags, not ES modules.
-// MoonwellAdapter, AaveAdapter, SaveAdapter are defined by their adapter files.

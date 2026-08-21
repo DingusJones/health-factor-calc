@@ -89,6 +89,7 @@ async function fetchPosition(wallet) {
     totalCollateralUsd: totalSupplied, // approximation
     collaterals,
     borrows,
+    availableMarkets: [], // Save has 89 reserves but no CF data via API — skip for now
     liquidationPrices: [],
     note: 'HF is approximate (deposit/borrow ratio). Exact HF requires per-asset collateral factors from on-chain reserve config.',
     raw: position,

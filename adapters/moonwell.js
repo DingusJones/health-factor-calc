@@ -3,9 +3,7 @@
  *
  * Supports: Base (8453), Optimism (10)
  * API is public, returns structured JSON.
- *
- * To add a new chain to Moonwell: just add the chain ID to the Moonwell chain
- * mapping below and to PROTOCOLS in config/chains.js. The API uses ?chain=base|optimism.
+ * Market list (all lendable/borrowable assets) fetched for the simulator.
  */
 
 const MOONWELL_API = 'https://api.moonwell.fi/v1';
@@ -14,28 +12,41 @@ const MOONWELL_CHAINS = {
   10: 'optimism',
 };
 
-// Moonwell's API whitelists specific origins (moonwell.fi, localhost) and sends
-// NO Access-Control-Allow-Origin header for other origins (e.g. github.io), which
-// makes browsers block the request with "Failed to fetch". corsproxy.io is a free
-// CORS-relay that forwards the request and adds allow-origin: *.
-const CORS_PROXY = 'https://corsproxy.io/?url=';
+// Moonwell's API whitelists specific origins and sends NO CORS header for github.io.
+// cors.sh is a free CORS relay that sends Access-Control-Allow-Origin: * and
+// doesn't rate-limit sequential requests (verified working from browser context).
+const CORS_PROXY = 'https://proxy.cors.sh/';
 
 /**
- * Fetch through Moonwell, falling back to a CORS proxy if the direct call is
- * blocked. Direct first (fast, works from whitelisted origins), proxy on failure.
+ * Fetch a Moonwell endpoint, routed through the CORS proxy.
  */
 async function moonwellFetch(path) {
   const url = `${MOONWELL_API}${path}`;
+  const r = await fetch(CORS_PROXY + url);
+  if (!r.ok) throw new Error(`Moonwell proxy HTTP ${r.status}`);
+  return await r.json();
+}
+
+/**
+ * Fetch all available Moonwell markets (for the simulator's add-token dropdown).
+ * Returns [{ asset, mToken, collateralFactor, deprecated }]
+ */
+async function fetchAvailableMarkets(chainId) {
+  const chainParam = MOONWELL_CHAINS[chainId];
+  if (!chainParam) return [];
   try {
-    const r = await fetch(url);
-    if (!r.ok) throw new Error(`Moonwell HTTP ${r.status}`);
-    return await r.json();
-  } catch (directErr) {
-    // CORS/network failure — retry through the proxy
-    const r = await fetch(CORS_PROXY + encodeURIComponent(url));
-    if (!r.ok) throw new Error(`Moonwell proxy HTTP ${r.status}`);
-    return await r.json();
-  }
+    const resp = await moonwellFetch(`/markets?chain=${chainParam}`);
+    if (!resp.success) return [];
+    return (resp.data || [])
+      .filter(m => !m.deprecated)
+      .map(m => ({
+        asset: m.asset,
+        mToken: m.mToken,
+        collateralFactor: m.collateralFactor,
+        supplyApy: m.baseSupplyApy,
+        borrowApy: m.baseBorrowApy,
+      }));
+  } catch (e) { return []; }
 }
 
 /**
@@ -48,10 +59,12 @@ async function fetchPosition(wallet, chainId) {
   const chainParam = MOONWELL_CHAINS[chainId];
   if (!chainParam) throw new Error(`Moonwell not available on chain ${chainId}`);
 
-  // Fetch health + positions in parallel
-  const [healthResp, positionsResp] = await Promise.all([
+  // Fetch health, positions, and market list. cors.sh doesn't rate-limit
+  // so we can fire these in parallel.
+  const [healthResp, positionsResp, marketsResp] = await Promise.all([
     moonwellFetch(`/health/${wallet}?chain=${chainParam}`),
     moonwellFetch(`/positions/${wallet}?chain=${chainParam}&active=true`),
+    moonwellFetch(`/markets?chain=${chainParam}`).catch(() => null),
   ]);
 
   if (!healthResp.success) throw new Error(healthResp.error || 'Moonwell API error');
@@ -59,6 +72,18 @@ async function fetchPosition(wallet, chainId) {
 
   if (!positionsResp.success) throw new Error(positionsResp.error || 'Moonwell positions error');
   const positions = positionsResp.data || [];
+
+  // Build available markets list for simulator
+  let availableMarkets = [];
+  if (marketsResp && marketsResp.success) {
+    availableMarkets = (marketsResp.data || [])
+      .filter(m => !m.deprecated)
+      .map(m => ({
+        asset: m.asset,
+        mToken: m.mToken,
+        collateralFactor: m.collateralFactor,
+      }));
+  }
 
   // Build collaterals (markets with supply > 0)
   const collaterals = positions
@@ -68,7 +93,7 @@ async function fetchPosition(wallet, chainId) {
       suppliedUsd: p.suppliedUsd,
       collateralFactor: p.collateralUsd > 0 ? p.collateralUsd / p.suppliedUsd : 0,
       adjustedUsd: p.collateralUsd || 0,
-      price: 0, // Moonwell doesn't return price; we'd need price feed
+      price: 0, // filled by app.js after price fetch
     }));
 
   // Build borrows (markets with borrow > 0)
@@ -91,16 +116,14 @@ async function fetchPosition(wallet, chainId) {
     marketCount: health.marketCount,
     collaterals,
     borrows,
-    liquidationPrices: [], // computed in app.js after price feeds
-    // Flag: Moonwell doesn't return per-asset prices, so liquidation price
-    // calculation needs external price feeds (Phase 2 enhancement).
-    // For now, compute a simplified overall liquidation threshold.
+    availableMarkets,
+    liquidationPrices: [],
     raw: { health, positions },
   };
 }
 
 // Expose as global for browser script-tag loading
 if (typeof window !== 'undefined') {
-  window.MoonwellAdapter = { fetchPosition, MOONWELL_CHAINS };
+  window.MoonwellAdapter = { fetchPosition, fetchAvailableMarkets, MOONWELL_CHAINS };
 }
-if (typeof module !== 'undefined') module.exports = { fetchPosition, MOONWELL_CHAINS };
+if (typeof module !== 'undefined') module.exports = { fetchPosition, fetchAvailableMarkets, MOONWELL_CHAINS };
