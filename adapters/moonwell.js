@@ -1,129 +1,25 @@
-/**
- * Moonwell adapter — reads live positions from api.moonwell.fi
- *
- * Supports: Base (8453), Optimism (10)
- * API is public, returns structured JSON.
- * Market list (all lendable/borrowable assets) fetched for the simulator.
- */
-
-const MOONWELL_API = 'https://api.moonwell.fi/v1';
-const MOONWELL_CHAINS = {
-  8453: 'base',
-  10: 'optimism',
-};
-
-// Moonwell's API whitelists specific origins and sends NO CORS header for github.io.
-// cors.sh is a free CORS relay that sends Access-Control-Allow-Origin: * and
-// doesn't rate-limit sequential requests (verified working from browser context).
-const CORS_PROXY = 'https://proxy.cors.sh/';
-
-/**
- * Fetch a Moonwell endpoint, routed through the CORS proxy.
- */
-async function moonwellFetch(path) {
-  const url = `${MOONWELL_API}${path}`;
-  const r = await fetch(CORS_PROXY + url);
-  if (!r.ok) throw new Error(`Moonwell proxy HTTP ${r.status}`);
-  return await r.json();
-}
-
-/**
- * Fetch all available Moonwell markets (for the simulator's add-token dropdown).
- * Returns [{ asset, mToken, collateralFactor, deprecated }]
- */
-async function fetchAvailableMarkets(chainId) {
-  const chainParam = MOONWELL_CHAINS[chainId];
-  if (!chainParam) return [];
-  try {
-    const resp = await moonwellFetch(`/markets?chain=${chainParam}`);
-    if (!resp.success) return [];
-    return (resp.data || [])
-      .filter(m => !m.deprecated)
-      .map(m => ({
-        asset: m.asset,
-        mToken: m.mToken,
-        collateralFactor: m.collateralFactor,
-        supplyApy: m.baseSupplyApy,
-        borrowApy: m.baseBorrowApy,
-      }));
-  } catch (e) { return []; }
-}
-
-/**
- * Fetch a live Moonwell position.
- * @param {string} wallet - EVM address (0x...)
- * @param {number} chainId - 8453 or 10
- * @returns {Promise<object>} normalized position shape
- */
-async function fetchPosition(wallet, chainId) {
-  const chainParam = MOONWELL_CHAINS[chainId];
-  if (!chainParam) throw new Error(`Moonwell not available on chain ${chainId}`);
-
-  // Fetch health, positions, and market list. cors.sh doesn't rate-limit
-  // so we can fire these in parallel.
-  const [healthResp, positionsResp, marketsResp] = await Promise.all([
-    moonwellFetch(`/health/${wallet}?chain=${chainParam}`),
-    moonwellFetch(`/positions/${wallet}?chain=${chainParam}&active=true`),
-    moonwellFetch(`/markets?chain=${chainParam}`).catch(() => null),
-  ]);
-
-  if (!healthResp.success) throw new Error(healthResp.error || 'Moonwell API error');
-  const health = healthResp.data;
-
-  if (!positionsResp.success) throw new Error(positionsResp.error || 'Moonwell positions error');
-  const positions = positionsResp.data || [];
-
-  // Build available markets list for simulator
-  let availableMarkets = [];
-  if (marketsResp && marketsResp.success) {
-    availableMarkets = (marketsResp.data || [])
-      .filter(m => !m.deprecated)
-      .map(m => ({
-        asset: m.asset,
-        mToken: m.mToken,
-        collateralFactor: m.collateralFactor,
-      }));
-  }
-
-  // Build collaterals (markets with supply > 0)
-  const collaterals = positions
-    .filter(p => p.suppliedUsd > 0)
-    .map(p => ({
-      asset: p.market,
-      suppliedUsd: p.suppliedUsd,
-      collateralFactor: p.collateralUsd > 0 ? p.collateralUsd / p.suppliedUsd : 0,
-      adjustedUsd: p.collateralUsd || 0,
-      price: 0, // filled by app.js after price fetch
-    }));
-
-  // Build borrows (markets with borrow > 0)
-  const borrows = positions
-    .filter(p => p.borrowedUsd > 0)
-    .map(p => ({
-      asset: p.market,
-      borrowedUsd: p.borrowedUsd,
-      price: 0,
-    }));
-
-  return {
-    protocol: 'moonwell',
-    chain: chainParam,
-    chainId,
-    healthFactor: health.healthFactor,
-    totalSuppliedUsd: health.totalSupplyUsd,
-    totalBorrowedUsd: health.totalBorrowUsd,
-    totalCollateralUsd: health.totalCollateralUsd,
-    marketCount: health.marketCount,
-    collaterals,
-    borrows,
-    availableMarkets,
-    liquidationPrices: [],
-    raw: { health, positions },
-  };
-}
-
-// Expose as global for browser script-tag loading
-if (typeof window !== 'undefined') {
-  window.MoonwellAdapter = { fetchPosition, fetchAvailableMarkets, MOONWELL_CHAINS };
-}
-if (typeof module !== 'undefined') module.exports = { fetchPosition, fetchAvailableMarkets, MOONWELL_CHAINS };
+/** Moonwell API adapter with Compound-compatible, read-only amount enrichment. */
+const MOONWELL_API='https://api.moonwell.fi/v1',CORS_PROXY='https://proxy.cors.sh/';
+const MOONWELL_CHAINS={8453:'base',10:'optimism'};
+// Verified standard ERC-20 and Compound CErc20/CToken ABI selectors.
+const SELECTORS=Object.freeze({balanceOf:'0x70a08231',decimals:'0x313ce567',exchangeRateStored:'0x182df0f5',borrowBalanceStored:'0x95dd9193',underlying:'0x6f307dc3'});
+const ZERO_ADDRESS='0x'+'0'.repeat(40),EXP_SCALE=10n**18n;
+function address(v){if(!/^0x[0-9a-fA-F]{40}$/.test(v||''))return null;const normalized=v.toLowerCase();return normalized===ZERO_ADDRESS?null:normalized;}
+function uintWord(hex,label){if(!/^0x[0-9a-fA-F]{64}$/.test(hex||''))throw new Error(`Malformed ${label} ABI response`);return BigInt(hex);}
+function addressWord(hex,label){return '0x'+uintWord(hex,label).toString(16).padStart(64,'0').slice(24);}
+function decimalString(raw,decimals){raw=BigInt(raw);if(!Number.isInteger(decimals)||decimals<0||decimals>255)throw new Error('Invalid token decimals');const scale=10n**BigInt(decimals),whole=raw/scale,fraction=(raw%scale).toString().padStart(decimals,'0').replace(/0+$/,'');return fraction?`${whole}.${fraction}`:whole.toString();}
+function suppliedRawFromCToken(balance,rate){return(BigInt(balance)*BigInt(rate)/EXP_SCALE).toString();}
+function finiteNumber(v){if(v===null||v===undefined||v==='')return null;const n=Number(v);return Number.isFinite(n)?n:null;}
+async function moonwellFetch(path,fetchImpl=fetch){let r;try{r=await fetchImpl(CORS_PROXY+MOONWELL_API+path);}catch(e){throw new Error(`Moonwell API relay request failed: ${e.message}`);}if(!r.ok)throw new Error(`Moonwell API relay HTTP ${r.status}`);try{return await r.json();}catch(_){throw new Error('Moonwell API relay returned malformed JSON');}}
+function marketForPosition(p,markets){for(const candidate of[p.marketAddress,p.mTokenAddress].map(address).filter(Boolean)){const hit=markets.find(m=>[m.marketAddress,m.mTokenAddress,m.mToken,m.assetAddress].map(address).includes(candidate));if(hit)return hit;}const symbol=String(p.market||p.symbol||'').toLowerCase();return markets.find(m=>[m.asset,m.symbol,m.mToken].some(v=>String(v||'').toLowerCase()===symbol))||null;}
+function normalizeNativePosition(p,m){return{assetAddress:address(p.assetAddress)||address(m?.assetAddress)||null,mTokenAddress:address(p.mTokenAddress)||address(m?.mTokenAddress)||address(m?.mToken)||null,marketAddress:address(p.marketAddress)||address(m?.marketAddress)||address(m?.mTokenAddress)||null,symbol:p.symbol||p.market||m?.asset||m?.symbol||'Unknown',suppliedUsd:finiteNumber(p.suppliedUsd),borrowedUsd:finiteNumber(p.borrowedUsd),collateralUsd:finiteNumber(p.collateralUsd),collateralEnabled:p.collateralEnabled===true,collateralFactor:finiteNumber(m?.collateralFactor??p.collateralFactor)};}
+async function enrichMarket(wallet,native,rpcs,call=globalThis.rpcCall,encode=globalThis.encodeAddress){const warnings=[],mToken=address(native.mTokenAddress||native.marketAddress);let underlying=address(native.assetAddress);const symbol=String(native.symbol||'').toUpperCase(),isNativeEth=!underlying&&['ETH','WETH','MWETH'].includes(symbol);if(!mToken)return{warnings:['Raw enrichment unavailable: Moonwell mToken address is missing.'],supply:null,borrow:null};if(typeof call!=='function'||typeof encode!=='function')return{warnings:['RPC failure: RPC helpers are unavailable.'],supply:null,borrow:null};if(!underlying&&!isNativeEth)try{underlying=addressWord(await call(rpcs,mToken,SELECTORS.underlying),'underlying');}catch(e){warnings.push(`Raw enrichment unavailable: underlying address call failed (${e.message}).`);}if(!underlying&&!isNativeEth)warnings.push('Raw enrichment unavailable: Moonwell underlying address is missing.');const arg=encode(wallet),tasks={cBalance:call(rpcs,mToken,SELECTORS.balanceOf+arg),exchangeRate:call(rpcs,mToken,SELECTORS.exchangeRateStored),borrowBalance:call(rpcs,mToken,SELECTORS.borrowBalanceStored+arg)};if(underlying)tasks.decimals=call(rpcs,underlying,SELECTORS.decimals);const keys=Object.keys(tasks),settled=await Promise.allSettled(Object.values(tasks)),values={};settled.forEach((r,i)=>{if(r.status==='fulfilled')values[keys[i]]=r.value;else warnings.push(`RPC failure for ${keys[i]}: ${r.reason?.message||r.reason}.`);});let decimals=isNativeEth?18:null;try{if(values.decimals)decimals=Number(uintWord(values.decimals,'decimals'));}catch(e){warnings.push(e.message+'.');}let supply=null,borrow=null;try{if(values.cBalance&&values.exchangeRate&&decimals!=null){const cTokenBalanceRaw=uintWord(values.cBalance,'balanceOf').toString(),exchangeRateStoredRaw=uintWord(values.exchangeRate,'exchangeRateStored').toString(),rawAmount=suppliedRawFromCToken(cTokenBalanceRaw,exchangeRateStoredRaw),humanAmount=decimalString(rawAmount,decimals);supply={rawAmount,decimals,amount:Number(humanAmount),humanAmount,unitsKnown:true,cTokenBalanceRaw,exchangeRateStoredRaw};}}catch(e){warnings.push(`Raw supplied amount unavailable: ${e.message}.`);}try{if(values.borrowBalance&&decimals!=null){const rawAmount=uintWord(values.borrowBalance,'borrowBalanceStored').toString(),humanAmount=decimalString(rawAmount,decimals);borrow={rawAmount,decimals,amount:Number(humanAmount),humanAmount,unitsKnown:true};}}catch(e){warnings.push(`Raw borrowed amount unavailable: ${e.message}.`);}if(!supply)warnings.push('Raw supplied token amount is unavailable; API USD supply is retained as a snapshot fallback.');if(!borrow)warnings.push('Raw borrowed token amount is unavailable; API USD borrow is retained as a snapshot fallback.');return{underlying,supply,borrow,warnings};}
+function apiValuation(usd,detail){if(!(usd>=0)||!detail?.unitsKnown||!(detail.amount>0))return null;const p=usd/detail.amount;return Number.isFinite(p)&&p>=0?p:null;}
+function applyDisplayPrice(item,price,source='Coinbase/CoinGecko external spot'){item.displayPrice=price>0?price:null;item.displayPriceSource=item.displayPrice?source:null;return item;}
+async function mapLimit(items,limit,worker){const out=new Array(items.length);let next=0;async function run(){while(next<items.length){const i=next++;out[i]=await worker(items[i],i);}}await Promise.all(Array.from({length:Math.min(limit,items.length)},run));return out;}
+function availableMarket(m){return{asset:m.asset,assetAddress:m.assetAddress,mToken:m.mToken,mTokenAddress:m.mTokenAddress||m.mToken,marketAddress:m.marketAddress,collateralFactor:finiteNumber(m.collateralFactor),supplyApy:m.baseSupplyApy,borrowApy:m.baseBorrowApy};}
+async function fetchAvailableMarkets(chainId){const chain=MOONWELL_CHAINS[chainId];if(!chain)return[];try{const r=await moonwellFetch(`/markets?chain=${chain}`);return r?.success&&Array.isArray(r.data)?r.data.filter(m=>!m.deprecated).map(availableMarket):[];}catch(_){return[];}}
+async function fetchPosition(wallet,chainId,chainConfig){const chain=MOONWELL_CHAINS[chainId];if(!chain)throw new Error(`Moonwell not available on chain ${chainId}`);if(!chainConfig?.rpcs?.length)throw new Error(`Moonwell RPC configuration unavailable for ${chain}`);const paths=[`/health/${wallet}?chain=${chain}`,`/positions/${wallet}?chain=${chain}&active=true`,`/markets?chain=${chain}`],[hr,pr,mr]=await Promise.allSettled(paths.map(path=>moonwellFetch(path)));if(hr.status==='rejected')throw new Error(`Moonwell health API failure (CORS relay required): ${hr.reason.message}`);if(pr.status==='rejected')throw new Error(`Moonwell positions API failure (CORS relay required): ${pr.reason.message}`);if(!hr.value?.success||!hr.value.data||typeof hr.value.data!=='object')throw new Error(`Malformed Moonwell health response: ${hr.value?.error||'missing data'}`);if(!pr.value?.success||!Array.isArray(pr.value.data))throw new Error(`Malformed Moonwell positions response: ${pr.value?.error||'expected an array'}`);const health=hr.value.data,positions=pr.value.data,warnings=[],notes=['Moonwell API response freshness is not provided; USD values are current API snapshots with unknown source timestamp.','Moonwell browser API access depends on the configured CORS relay.'];let markets=[];if(mr.status==='fulfilled'&&mr.value?.success&&Array.isArray(mr.value.data))markets=mr.value.data;else warnings.push(`Moonwell markets API unavailable or malformed; address metadata and collateral factors may be unavailable${mr.status==='rejected'?` (${mr.reason.message})`:''}.`);const native=positions.map(p=>normalizeNativePosition(p,marketForPosition(p,markets))),enriched=await mapLimit(native,3,item=>enrichMarket(wallet,item,chainConfig.rpcs)),collaterals=[],borrows=[];native.forEach((item,i)=>{const detail=enriched[i];warnings.push(...detail.warnings.map(w=>`${item.symbol}: ${w}`));const common={...item,asset:item.symbol,assetAddress:item.assetAddress||detail.underlying||null};if((item.suppliedUsd??0)>0||(detail.supply?.rawAmount&&BigInt(detail.supply.rawAmount)>0n)){const price=apiValuation(item.suppliedUsd,detail.supply);if(price==null)warnings.push(`${item.symbol}: Moonwell API supply valuation price unavailable because token units or API USD valuation are unavailable.`);collaterals.push({...common,...detail.supply,suppliedUsd:item.suppliedUsd,adjustedUsd:item.collateralEnabled&&item.collateralFactor!=null&&item.suppliedUsd!=null?item.suppliedUsd*item.collateralFactor:null,price,protocolRiskPrice:price,priceSource:price==null?null:'Moonwell API valuation (USD snapshot ÷ on-chain amount)',protocolPriceSource:price==null?null:'Moonwell API valuation; not a protocol oracle',priceBasis:price==null?null:'conditional-api-valuation'});}if((item.borrowedUsd??0)>0||(detail.borrow?.rawAmount&&BigInt(detail.borrow.rawAmount)>0n)){const price=apiValuation(item.borrowedUsd,detail.borrow);if(price==null)warnings.push(`${item.symbol}: Moonwell API debt valuation price unavailable because token units or API USD valuation are unavailable.`);borrows.push({...common,...detail.borrow,borrowedUsd:item.borrowedUsd,price,protocolRiskPrice:price,priceSource:price==null?null:'Moonwell API valuation (USD snapshot ÷ on-chain amount)',protocolPriceSource:price==null?null:'Moonwell API valuation; not a protocol oracle',priceBasis:price==null?null:'conditional-api-valuation'});}});const noPosition=positions.length===0&&!(Number(health.totalSupplyUsd)>0)&&!(Number(health.totalBorrowUsd)>0);return{protocol:'moonwell',chain,chainId,healthFactor:health.healthFactor,healthFactorSource:'Moonwell health API (authoritative aggregate)',totalSuppliedUsd:health.totalSupplyUsd,totalBorrowedUsd:health.totalBorrowUsd,totalCollateralUsd:health.totalCollateralUsd,marketCount:health.marketCount,collaterals,borrows,availableMarkets:markets.filter(m=>!m.deprecated).map(availableMarket),liquidationPrices:[],warnings,notes,noPosition,raw:{health,positions,markets},fetchedAt:new Date().toISOString()};}
+const exported={fetchPosition,fetchAvailableMarkets,MOONWELL_CHAINS,SELECTORS,marketForPosition,normalizeNativePosition,suppliedRawFromCToken,decimalString,uintWord,addressWord,apiValuation,applyDisplayPrice,enrichMarket};
+if(typeof window!=='undefined')window.MoonwellAdapter=exported;
+if(typeof module!=='undefined')module.exports=exported;

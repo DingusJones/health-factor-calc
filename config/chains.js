@@ -16,8 +16,10 @@ const CHAINS = {
     aave: {
       pool: '0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2',
       poolAddressesProvider: '0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e',
-      uiPoolDataProvider: '0x56b7A1012765C285afAC8b8F25C69Bf10ccfE978',
+      // Current official aave-dao/aave-address-book V3.3 UI provider.
+      uiPoolDataProvider: '0x2dAd8162A989cd99D673dE4425Bb2298Db1E1aA2',
     },
+    morpho: { core: '0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb', api: 'https://api.morpho.org/graphql' },
   },
   8453: {
     id: 8453,
@@ -27,8 +29,10 @@ const CHAINS = {
     aave: {
       pool: '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',
       poolAddressesProvider: '0xe20fCBdBfFC4Dd138cE8b2E6FBb6CB49777ad64D',
-      uiPoolDataProvider: '0xb84A20e848baE3e13897934bB4e74E2225f4546B',
+      // Current official aave-dao/aave-address-book V3.3 UI provider.
+      uiPoolDataProvider: '0x0C6BC4a12039788be08F87e87Cff87FEDbd1D386',
     },
+    morpho: { core: '0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb', api: 'https://api.morpho.org/graphql' },
   },
   10: {
     id: 10,
@@ -212,12 +216,7 @@ const PROTOCOLS = {
     adapter: 'adapters/save.js',
   },
   // ── Future protocols (add when validated) ──
-  // morpho: {
-  //   name: 'Morpho',
-  //   chains: [1, 8453],
-  //   chainType: 'evm',
-  //   adapter: 'adapters/morpho.js',
-  // },
+  morpho: { name: 'Morpho Blue', chains: [1, 8453], chainType: 'evm', adapter: 'adapters/morpho.js' },
   // kamino: {
   //   name: 'Kamino',
   //   chains: ['solana'],

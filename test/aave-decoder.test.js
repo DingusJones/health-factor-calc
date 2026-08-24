@@ -1,0 +1,14 @@
+const test = require('node:test'); const assert = require('node:assert/strict');
+const { decodeGetUserAccountData, encodeAddress, validateRpcConfig } = require('../lib/rpc');
+const { decodeReservesData, decodeUserReservesData, rayMul } = require('../adapters/aave');
+const word=n=>BigInt(n).toString(16).padStart(64,'0');
+test('decodes canonical six-word Aave account data and scales each field',()=>{
+  const hex='0x'+[12345678901234567890n,250000000n,75000000n,8250n,7000n,1500000000000000000n].map(word).join('');
+  const d=decodeGetUserAccountData(hex); assert.equal(d.totalCollateralBaseRaw,'12345678901234567890');
+  assert.equal(d.totalDebtBase,2.5); assert.equal(d.availableBorrowsBase,.75); assert.equal(d.currentLiquidationThreshold,82.5);
+  assert.equal(d.ltv,70); assert.equal(d.healthFactor,1.5);
+});
+test('zero debt is no-borrow while malformed responses fail',()=>{ const d=decodeGetUserAccountData('0x'+[1n,0n,0n,0n,0n,2n].map(word).join('')); assert.equal(d.healthFactor,Infinity); assert.throws(()=>decodeGetUserAccountData('0x')); });
+test('validates address and RPC configuration',()=>{assert.equal(encodeAddress('0x'+'ab'.repeat(20)).length,64); assert.throws(()=>encodeAddress('0x123')); assert.throws(()=>validateRpcConfig([]));});
+test('decodes verified V3.3 four-word user reserve tuples',()=>{const address=BigInt('0x'+'12'.repeat(20));const hex='0x'+[64n,2n,1n,address,3n,1n,4n].map(word).join('');const d=decodeUserReservesData(hex);assert.equal(d.userEmodeCategoryId,2);assert.equal(d.items[0].underlyingAsset,'0x'+'12'.repeat(20));assert.equal(d.items[0].scaledATokenBalance,3n);assert.equal(d.items[0].usageAsCollateralEnabledOnUser,true);assert.equal(d.items[0].scaledVariableDebt,4n);assert.equal(rayMul(2n,10n**27n),2n);});
+test('decodes verified V3.3 dynamic reserve metadata tuple',()=>{const words=Array(40).fill(0n);words[0]=BigInt('0x'+'34'.repeat(20));words[1]=1280n;words[2]=1344n;words[3]=6n;words[4]=7500n;words[5]=8000n;words[8]=1n;words[12]=10n**27n;words[13]=2n*10n**27n;words[17]=BigInt('0x'+'56'.repeat(20));words[18]=BigInt('0x'+'78'.repeat(20));words[22]=123000000n;words[23]=BigInt('0x'+'90'.repeat(20));words[29]=1n;words[31]=7n;words[33]=100n;words[34]=2n;words[37]=1n;const text=s=>word(BigInt(s.length))+Buffer.from(s).toString('hex').padEnd(64,'0');const head=[160n,100000000n,0n,0n,0n].map(word).join('');const array=word(1n)+word(32n)+words.map(word).join('')+text('USD Coin')+text('USDC');const d=decodeReservesData('0x'+head+array);assert.equal(d.baseCurrencyUnit,100000000n);assert.equal(d.reserves[0].symbol,'USDC');assert.equal(d.reserves[0].liquidationThresholdBps,8000);assert.equal(d.reserves[0].priceInMarketReferenceCurrency,123000000n);assert.equal(d.reserves[0].debtCeiling,100n);assert.equal(d.reserves[0].borrowableInIsolation,true);});

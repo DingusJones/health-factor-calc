@@ -4,14 +4,21 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
   <title>DeFi Health Factor Calculator</title>
-  <link rel="stylesheet" href="styles.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+  <link rel="stylesheet" href="styles.css?v=black-ledger-1">
+  <link rel="icon" type="image/svg+xml" href="assets/mark.svg?v=black-ledger-1">
 </head>
 <body>
   <div class="app">
     <header class="app-header">
-      <h1>🛡️ DeFi Health Factor Calculator</h1>
+      <div class="brand">
+        <img class="brand-mark" src="assets/mark.svg?v=black-ledger-1" alt="">
+        <div class="brand-copy">
+          <p class="eyebrow">Risk ledger / DeFi</p>
+          <h1>Health Factor Calculator</h1>
+        </div>
+      </div>
       <p class="subtitle">Live positions across lending protocols</p>
+      <p class="status-line"><span aria-hidden="true"></span>Read-only analysis</p>
     </header>
 
     <div class="controls">
@@ -36,12 +43,15 @@
     </div>
 
     <div id="results" class="results">
-      <div class="placeholder">Enter a wallet address and hit Calculate to see live positions</div>
+      <div class="placeholder">
+        <img class="placeholder-mark" src="assets/mark.svg?v=black-ledger-1" alt="">
+        <span>Enter a wallet address and hit Calculate to see live positions</span>
+      </div>
     </div>
 
     <footer class="app-footer">
       <p>Read-only. No wallet connection. No transactions. Just data.</p>
-      <p class="chain-count">Supports: Moonwell (Base, OP) · Aave V3 (15 chains) · Save (Solana)</p>
+      <p class="chain-count">Supports: Moonwell (Base, OP) · Aave V3 (15 chains; per-asset on Ethereum/Base) · Morpho Blue (Ethereum/Base) · Save (Solana)</p>
     </footer>
   </div>
 
@@ -49,14 +59,16 @@
   <script src="config/chains.js?v=4"></script>
   <!-- Lib -->
   <script src="lib/hf-math.js?v=4"></script>
+  <script src="lib/risk-model.js?v=1"></script>
   <script src="lib/gauge.js?v=4"></script>
   <script src="lib/rpc.js?v=4"></script>
   <script src="lib/prices.js?v=4"></script>
   <!-- Adapters -->
-  <script src="adapters/moonwell.js?v=4"></script>
+  <script src="adapters/moonwell.js?v=8"></script>
   <script src="adapters/aave.js?v=4"></script>
+  <script src="adapters/morpho.js?v=1"></script>
   <script src="adapters/save.js?v=4"></script>
   <!-- App -->
-  <script src="app.js?v=4"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>
